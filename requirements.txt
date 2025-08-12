@@ -1,0 +1,8 @@
+pandas>=1.5
+numpy>=1.21
+torch>=1.12
+pytorch-lightning>=2.0
+pytorch-forecasting>=0.12
+streamlit>=1.18
+altair>=4.2
+matplotlib>=3.5
