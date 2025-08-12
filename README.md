@@ -6,6 +6,7 @@ Simulation data + TemporalFusionTransformer demo using pytorch-forecasting.
 innovatemart-forecast/
 
 ├─ data/
+
 │  └─ simulated_sales.csv            
 ├─ simulate_data.py                  
 ├─ train_tft.py                      
@@ -32,6 +33,7 @@ Files:
    python predict_and_save.py
 5. Run Streamlit:
    streamlit run streamlit_app.py
+
 
 
 
