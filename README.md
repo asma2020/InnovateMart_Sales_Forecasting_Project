@@ -5,11 +5,11 @@ Simulation + TemporalFusionTransformer demo using pytorch-forecasting.
 
 innovatemart-forecast/
 ├─ data/
-│  └─ simulated_sales.csv            # تولیدشده توسط simulate_data.py
-├─ simulate_data.py                  # شبیه‌سازی داده‌ها
-├─ train_tft.py                      # آماده‌سازی، آموزش و ذخیرهٔ مدل
-├─ predict_and_save.py               # تولید پیش‌بینی و ذخیرهٔ نتایج (فایل CSV)
-├─ streamlit_app.py                  # اپ Streamlit برای نمایش نتایج
+│  └─ simulated_sales.csv            
+├─ simulate_data.py                  
+├─ train_tft.py                      
+├─ predict_and_save.py               
+├─ streamlit_app.py                  
 ├─ requirements.txt
 └─ README.md
 
@@ -31,4 +31,5 @@ Files:
    python predict_and_save.py
 5. Run Streamlit:
    streamlit run streamlit_app.py
+
 
