@@ -1,7 +1,7 @@
 # InnovateMart — Sales forecasting demo
 
-## Overview
-Simulation + TemporalFusionTransformer demo using pytorch-forecasting.
+## Project Overview
+Simulation data + TemporalFusionTransformer demo using pytorch-forecasting.
 
 innovatemart-forecast/
 ├─ data/
@@ -31,5 +31,6 @@ Files:
    python predict_and_save.py
 5. Run Streamlit:
    streamlit run streamlit_app.py
+
 
 
