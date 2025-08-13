@@ -134,10 +134,14 @@ The TFT model includes several performance optimizations:
 
 ## 🎨 Dashboard Features
 
-### Historical Analysis
-- Time series visualization of sales trends
-- Store-by-store performance comparison
-- Promotional impact analysis
+- **Data Loading & Model Artifacts** – Automatically loads preprocessed datasets and the trained TFT model, with caching for speed.
+- **Store Selection** – Choose a `store_id` to view historical sales and predictions.
+- **Historical Sales Chart** – Interactive Altair line chart showing daily sales trends for the selected store.
+- **Forecast Visualization** – Model predictions overlaid with actual sales, broken down by forecast horizon.
+- **Sample Predictions Table** – View raw forecast output including prediction horizon and corresponding dates.
+- **Variable Importance** – Bar chart showing which features most influenced the model’s forecasts.
+- **Error Handling** – Clear user messages if data is missing or calculations fail.
+
 
 ### Forecasting Interface
 - Real-time prediction generation
@@ -226,6 +230,7 @@ For questions or issues:
 
 ---
 
-**Happy Forecasting! 📊✨**---
+
 
 **Happy Forecasting! 📊✨**
+
