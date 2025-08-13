@@ -188,7 +188,7 @@ else:
 
         pred_df = pd.DataFrame(rows)
 
-        st.write("نمونهٔ خروجی پیش‌بینی (هر ردیف = پنجره، افق پیش‌بینی):")
+        st.write("نمونهٔ خروجی پیش‌بینی):")
         st.dataframe(pred_df.head(50))
 
         # Prepare overlay chart
@@ -266,4 +266,5 @@ except Exception as e:
     st.error(f"خطا در نمایش اهمیت متغیرها: {str(e)}")
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
+
 
