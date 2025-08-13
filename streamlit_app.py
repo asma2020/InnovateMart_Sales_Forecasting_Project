@@ -260,11 +260,12 @@ try:
     
     # Advanced version - Feature importance not available
     st.write("### نسخه پیشرفته: اهمیت متغیرها")
-    st.warning("⚠️ در حال حاضر امکان محاسبه اهمیت متغیرها وجود ندارد. ویژگی feature_importances در خروجی تفسیر موجود نیست.")
+    st.warning("⚠️ در حال حاضر امکان محاسبه اهمیت متغیرها وجود ندارد!")
     
 except Exception as e:
     st.error(f"خطا در نمایش اهمیت متغیرها: {str(e)}")
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
+
 
 
