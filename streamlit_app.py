@@ -257,7 +257,7 @@ try:
         if hasattr(training, 'time_varying_unknown_reals'):
             st.write("متغیرهای ناشناختهٔ متغیر با زمان:", training.time_varying_unknown_reals)
             
-        st.info("💡 برای محاسبهٔ دقیق اهمیت متغیرها، از روش‌های SHAP یا permutation importance استفاده کنید.")
+        st.info("💡  SHAP یا permutation importance")
     else:
         st.info("دیتاست اعتبارسنجی برای نمایش اطلاعات متغیرها موجود نیست.")
         
@@ -265,3 +265,4 @@ except Exception as e:
     st.write("خطا در نمایش اطلاعات متغیرها:", str(e))
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
+
