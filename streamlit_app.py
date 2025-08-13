@@ -220,7 +220,7 @@ else:
         ).properties(
             width=900,
             height=420,
-            title=f"فروش تاریخی و پیش‌بینی‌شده برای store_id={sel} (تمام افق‌ها)"
+            title=f" store_id={sel} فروش تاریخی و پیش‌بینی‌شده برای"
         ).interactive()
 
         st.altair_chart(overlay_chart, use_container_width=True)
@@ -266,3 +266,4 @@ except Exception as e:
     st.error(f"خطا در نمایش اهمیت متغیرها: {str(e)}")
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
+
