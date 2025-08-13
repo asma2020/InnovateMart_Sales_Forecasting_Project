@@ -230,39 +230,39 @@ else:
         st.write("جزئیات خطا:", str(e))
 
 # -----------------------------
-# Variable Importance (fixed)
+# -----------------------------
+# Variable Importance (Safe Version)
 # -----------------------------
 st.markdown("---")
 st.subheader("اهمیت متغیرها")
 
 try:
-    if 'pred_ds' in locals() and pred_ds is not None:
-        # Instead of calculate_variable_importance, show feature names
-        st.write("**متغیرهای ورودی مدل:**")
-        
-        # Show reals (continuous variables)
-        if hasattr(training, 'reals'):
-            st.write("متغیرهای پیوسته:", training.reals)
-        
-        # Show categoricals
-        if hasattr(training, 'categorical_encoders') and training.categorical_encoders is not None:
-            st.write("متغیرهای طبقه‌ای:", list(training.categorical_encoders.keys()))
-        else:
-            st.write("متغیرهای طبقه‌ای: هیچ متغیر طبقه‌ای تعریف نشده")
-        
-        # Show time varying variables
-        if hasattr(training, 'time_varying_known_reals'):
-            st.write("متغیرهای پیوستهٔ متغیر با زمان:", training.time_varying_known_reals)
-        
-        if hasattr(training, 'time_varying_unknown_reals'):
-            st.write("متغیرهای ناشناختهٔ متغیر با زمان:", training.time_varying_unknown_reals)
-            
-        st.info("💡  SHAP یا permutation importance")
-    else:
-        st.info("دیتاست اعتبارسنجی برای نمایش اطلاعات متغیرها موجود نیست.")
-        
+    # Simple version - List of variables
+    st.write("### نسخه ساده: لیست متغیرهای ورودی")
+    
+    # Continuous variables
+    continuous_vars = training.reals if hasattr(training, 'reals') else []
+    st.write("**متغیرهای پیوسته:**", continuous_vars)
+    
+    # Categorical variables
+    categorical_vars = training.categoricals if hasattr(training, 'categoricals') else []
+    st.write("**متغیرهای طبقه‌ای:**", categorical_vars if categorical_vars else "هیچ متغیر طبقه‌ای تعریف نشده")
+    
+    # Time-varying known reals
+    time_varying_known = training.time_varying_known_reals if hasattr(training, 'time_varying_known_reals') else []
+    st.write("**متغیرهای پیوستهٔ متغیر با زمان:**", time_varying_known)
+    
+    # Time-varying unknown reals
+    time_varying_unknown = training.time_varying_unknown_reals if hasattr(training, 'time_varying_unknown_reals') else []
+    st.write("**متغیرهای ناشناختهٔ متغیر با زمان:**", time_varying_unknown)
+    
+    st.info("💡 نسخه ساده فقط لیست متغیرها را نمایش می‌دهد.")
+    
+    # Advanced version - Feature importance not available
+    st.write("### نسخه پیشرفته: اهمیت متغیرها")
+    st.warning("⚠️ در حال حاضر امکان محاسبه اهمیت متغیرها وجود ندارد. ویژگی feature_importances در خروجی تفسیر موجود نیست.")
+    
 except Exception as e:
-    st.write("خطا در نمایش اطلاعات متغیرها:", str(e))
+    st.error(f"خطا در نمایش اهمیت متغیرها: {str(e)}")
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
-
