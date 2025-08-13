@@ -114,17 +114,17 @@ Open your browser to view the interactive forecasting dashboard.
 - **Quantile loss**: Provides prediction intervals
 
 ### Data Features
-| Feature | Type | Description |
-|---------|------|-------------|
-| daily_sales | Target | Daily sales amount |
-| promotion_active | Known | Promotional campaign indicator |
-| day_of_week | Known | Day of week (0-6) |
-| month | Known | Month of year |
-| is_weekend | Known | Weekend indicator |
-| store_size | Static | Store category (small/medium/large) |
-| city_population | Static | Market size indicator |
-| sales_lag_7/30 | Unknown | Lagged sales features |
-| sales_ma_7/30 | Unknown | Moving average features |
+| Feature | Description |
+|---------|-------------|
+| daily_sales | Daily sales amount |
+| promotion_active | Promotional campaign indicator |
+| day_of_week |  Day of week (0-6) |
+| month | Month of year |
+| is_weekend |  Weekend indicator |
+| store_size |Store category (small/medium/large) |
+| city_population | Market size indicator |
+| sales_lag_7/30 | Lagged sales features |
+| sales_ma_7/30 | Moving average features |
 
 ## 📈 Model Performance
 
@@ -235,5 +235,6 @@ For questions or issues:
 
 
 **Happy Forecasting! 📊✨**
+
 
 
