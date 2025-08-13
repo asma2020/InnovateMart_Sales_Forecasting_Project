@@ -40,6 +40,7 @@ innovatemart-forecast/
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 ###  Clone the Repository
 ```bash
 git clone https://github.com/asma2020/InnovateMart_Sales_Forecasting_Project.git
@@ -48,6 +49,7 @@ cd InnovateMart_Sales_Forecasting_Project
 
 
 # Install dependencies
+```bash
 pip install -r requirements.txt
 ```
 
@@ -233,4 +235,5 @@ For questions or issues:
 
 
 **Happy Forecasting! 📊✨**
+
 
