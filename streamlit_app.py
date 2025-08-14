@@ -7,6 +7,7 @@ from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 import altair as alt
 import torch
 import os
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # -----------------------------
 # Streamlit App Configuration
@@ -38,6 +39,119 @@ if missing:
         st.write(f"❌ {file}")
     st.info("لطفاً ابتدا train_tft.py را اجرا کنید و فایل‌های لازم را در پوشه‌های مربوطه قرار دهید.")
     st.stop()
+
+# -----------------------------
+# Feature Importance Functions
+# -----------------------------
+def calculate_permutation_importance(model, dataloader, n_repeats=5):
+    """Calculate permutation importance for model features"""
+    
+    # Get baseline predictions and performance
+    baseline_preds = []
+    true_values = []
+    
+    model.eval()
+    with torch.no_grad():
+        for x, y in dataloader:
+            # FIX: Access the prediction tensor from the model's Output object
+            pred_output = model(x)
+            pred_tensor = pred_output.prediction
+            baseline_preds.append(pred_tensor.cpu().numpy())
+            true_values.append(y[0].cpu().numpy())  # target is first element
+    
+    baseline_preds = np.concatenate(baseline_preds, axis=0)
+    true_values = np.concatenate(true_values, axis=0)
+    
+    # Calculate baseline MAE
+    baseline_mae = mean_absolute_error(true_values.flatten(), baseline_preds.flatten())
+    
+    # Get feature names
+    feature_names = []
+    if hasattr(dataloader.dataset, 'reals'):
+        feature_names.extend(dataloader.dataset.reals)
+    if hasattr(dataloader.dataset, 'categoricals'):
+        feature_names.extend(dataloader.dataset.categoricals)
+    
+    importance_scores = {}
+    
+    st.write(f"📊 محاسبه اهمیت متغیرها (MAE پایه: {baseline_mae:.4f})")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Calculate importance for each feature
+    # Permuting only a subset of features for demonstration
+    features_to_check = [f for f in feature_names if f not in ['date']] 
+    
+    for feat_idx, feature_name in enumerate(features_to_check):
+        status_text.text(f"در حال محاسبه اهمیت برای: {feature_name}")
+        
+        importance_values = []
+        
+        for repeat in range(n_repeats):
+            permuted_preds = []
+            
+            model.eval()
+            with torch.no_grad():
+                for x, y in dataloader:
+                    # Create a deep copy of the input dictionary to avoid side effects
+                    x_permuted = {key: value.clone() for key, value in x.items()}
+                    
+                    # Permute the feature if it exists in continuous variables
+                    if feature_name in dataloader.dataset.reals:
+                        feat_pos = dataloader.dataset.reals.index(feature_name)
+                        if 'encoder_cont' in x_permuted:
+                            perm_indices = torch.randperm(x_permuted['encoder_cont'].shape[0])
+                            x_permuted['encoder_cont'][:, :, feat_pos] = x_permuted['encoder_cont'][perm_indices, :, feat_pos]
+                        if 'decoder_cont' in x_permuted:
+                            perm_indices = torch.randperm(x_permuted['decoder_cont'].shape[0])
+                            x_permuted['decoder_cont'][:, :, feat_pos] = x_permuted['decoder_cont'][perm_indices, :, feat_pos]
+                    
+                    # Permute for categorical variables (requires a different approach)
+                    elif feature_name in dataloader.dataset.categoricals:
+                        feat_pos = dataloader.dataset.categoricals.index(feature_name)
+                        if 'encoder_cat' in x_permuted:
+                            perm_indices = torch.randperm(x_permuted['encoder_cat'].shape[0])
+                            x_permuted['encoder_cat'][:, :, feat_pos] = x_permuted['encoder_cat'][perm_indices, :, feat_pos]
+                        if 'decoder_cat' in x_permuted:
+                            perm_indices = torch.randperm(x_permuted['decoder_cat'].shape[0])
+                            x_permuted['decoder_cat'][:, :, feat_pos] = x_permuted['decoder_cat'][perm_indices, :, feat_pos]
+
+                    # FIX: Access the prediction tensor
+                    pred_permuted_output = model(x_permuted)
+                    pred_permuted_tensor = pred_permuted_output.prediction
+                    permuted_preds.append(pred_permuted_tensor.cpu().numpy())
+            
+            permuted_preds = np.concatenate(permuted_preds, axis=0)
+            permuted_mae = mean_absolute_error(true_values.flatten(), permuted_preds.flatten())
+            importance_values.append(permuted_mae - baseline_mae)
+        
+        importance_scores[feature_name] = np.mean(importance_values)
+        progress_bar.progress((feat_idx + 1) / len(features_to_check))
+    
+    status_text.text("محاسبه اهمیت متغیرها تکمیل شد! ✅")
+    return importance_scores
+
+def calculate_simple_attention_weights(model, dataloader):
+    """Extract attention weights from the model if available"""
+    model.eval()
+    attention_weights = []
+    
+    with torch.no_grad():
+        for x, _ in dataloader:
+            # FIX: Use tft.predict with return_attention=True for consistency
+            try:
+                raw_output = model.predict(x, mode="raw", return_attention=True)
+                # The attention weights are in raw_output.attention
+                attention_weights.append(raw_output.attention.cpu().numpy())
+            except Exception as e:
+                st.warning(f"Unable to extract attention weights. Error: {e}")
+                return None
+    
+    if attention_weights:
+        # The attention weights are typically [batch_size, num_heads, num_queries, num_keys]
+        # We average over batches and heads
+        return np.mean(np.concatenate(attention_weights, axis=0), axis=(0, 1))
+    return None
 
 # -----------------------------
 # Helpers: load data & artifacts
@@ -83,6 +197,7 @@ def load_artifacts():
         )
         state = torch.load(MODEL_STATE, map_location=torch.device("cpu"))
         tft.load_state_dict(state)
+        tft.eval() # Set model to evaluation mode after loading
         return training, validation, validation_raw, tft
     except Exception as e:
         st.error(f"خطا در بارگذاری مدل: {e}")
@@ -189,7 +304,7 @@ else:
         pred_df = pd.DataFrame(rows)
 
         st.write("نمونهٔ خروجی پیش‌بینی")
-        st.dataframe(pred_df.head(50))
+        st.dataframe(pred_df.head(20))
 
         # Prepare overlay chart
         actuals = store_df[["date", "daily_sales"]].rename(columns={"daily_sales": "sales"}).copy()
@@ -220,7 +335,7 @@ else:
         ).properties(
             width=900,
             height=420,
-            title=f" store_id={sel} فروش تاریخی و پیش‌بینی‌شده برای"
+            title=f"فروش تاریخی و پیش‌بینی‌شده برای store_id={sel}"
         ).interactive()
 
         st.altair_chart(overlay_chart, use_container_width=True)
@@ -230,43 +345,136 @@ else:
         st.write("جزئیات خطا:", str(e))
 
 # -----------------------------
-# -----------------------------
-# Variable Importance (Safe Version)
+# Enhanced Variable Importance Section
 # -----------------------------
 st.markdown("---")
-st.subheader("اهمیت متغیرها")
+st.subheader("🎯 اهمیت متغیرها (Feature Importance)")
 
-try:
-    # Simple version - List of variables
-    st.write("### نسخه ساده: لیست متغیرهای ورودی")
+# Create tabs for different importance methods
+tab1, tab2, tab3 = st.tabs(["📋 لیست متغیرها", "🔄 Permutation Importance", "🧠 Attention Weights"])
+
+with tab1:
+    st.write("### متغیرهای ورودی مدل")
     
     # Continuous variables
     continuous_vars = training.reals if hasattr(training, 'reals') else []
-    st.write("**متغیرهای پیوسته:**", continuous_vars)
+    if continuous_vars:
+        st.write("**متغیرهای پیوسته:**")
+        for i, var in enumerate(continuous_vars, 1):
+            st.write(f"{i}. `{var}`")
     
-    # Categorical variables
+    # Categorical variables  
     categorical_vars = training.categoricals if hasattr(training, 'categoricals') else []
-    st.write("**متغیرهای طبقه‌ای:**", categorical_vars if categorical_vars else "هیچ متغیر طبقه‌ای تعریف نشده")
+    if categorical_vars:
+        st.write("**متغیرهای طبقه‌ای:**")
+        for i, var in enumerate(categorical_vars, 1):
+            st.write(f"{i}. `{var}`")
+    else:
+        st.write("**متغیرهای طبقه‌ای:** هیچ متغیر طبقه‌ای تعریف نشده")
     
-    # Time-varying known reals
-    time_varying_known = training.time_varying_known_reals if hasattr(training, 'time_varying_known_reals') else []
-    st.write("**متغیرهای پیوستهٔ متغیر با زمان:**", time_varying_known)
+    # Time-varying variables
+    time_vars = training.time_varying_known_reals if hasattr(training, 'time_varying_known_reals') else []
+    if time_vars:
+        st.write("**متغیرهای متغیر با زمان:**")
+        for i, var in enumerate(time_vars, 1):
+            st.write(f"{i}. `{var}`")
+
+with tab2:
+    st.write("### محاسبه Permutation Importance")
+    st.info("این روش اهمیت هر متغیر را با اندازه‌گیری تغییر عملکرد مدل پس از تصادفی کردن آن متغیر محاسبه می‌کند.")
     
-    # Time-varying unknown reals
-    time_varying_unknown = training.time_varying_unknown_reals if hasattr(training, 'time_varying_unknown_reals') else []
-    st.write("**متغیرهای ناشناختهٔ متغیر با زمان:**", time_varying_unknown)
+    if st.button("🚀 محاسبه Permutation Importance", type="primary"):
+        if 'dl' in locals() and dl is not None:
+            try:
+                importance_scores = calculate_permutation_importance(tft, dl, n_repeats=3)
+                
+                if importance_scores:
+                    # Create DataFrame for plotting
+                    importance_df = pd.DataFrame([
+                        {"feature": k, "importance": v} for k, v in importance_scores.items()
+                    ]).sort_values("importance", ascending=False)
+                    
+                    # Streamlit bar chart
+                    st.write("**نمودار اهمیت متغیرها:**")
+                    st.bar_chart(importance_df.set_index("feature")["importance"])
+                    
+                    # Show table
+                    st.write("**جدول اهمیت متغیرها:**")
+                    importance_df["importance"] = importance_df["importance"].round(4)
+                    importance_df["رتبه"] = range(1, len(importance_df) + 1)
+                    st.dataframe(importance_df[["رتبه", "feature", "importance"]], use_container_width=True)
+                    
+                    # Interpretation
+                    st.write("**تفسیر نتایج:**")
+                    top_feature = importance_df.iloc[0]
+                    st.success(f"🏆 مهم‌ترین متغیر: `{top_feature['feature']}` با امتیاز {top_feature['importance']:.4f}")
+                    
+                    positive_features = importance_df[importance_df["importance"] > 0]
+                    if len(positive_features) > 0:
+                        st.info(f"📈 تعداد متغیرهای مؤثر (مثبت): {len(positive_features)}")
+                    
+                    negative_features = importance_df[importance_df["importance"] < 0]  
+                    if len(negative_features) > 0:
+                        st.warning(f"📉 متغیرهای با تأثیر منفی: {len(negative_features)}")
+                    
+                else:
+                    st.warning("امکان محاسبه اهمیت متغیرها وجود ندارد.")
+                    
+            except Exception as e:
+                st.error(f"خطا در محاسبه Permutation Importance: {e}")
+        else:
+            st.warning("ابتدا یک فروشگاه را انتخاب کنید و پیش‌بینی را اجرا کنید.")
+
+with tab3:
+    st.write("### وزن‌های Attention")
+    st.info("این بخش وزن‌های attention مدل Temporal Fusion Transformer را نمایش می‌دهد.")
     
-    st.info("💡 نسخه ساده فقط لیست متغیرها را نمایش می‌دهد.")
-    
-    # Advanced version - Feature importance not available
-    st.write("### نسخه پیشرفته: اهمیت متغیرها")
-    st.warning("⚠️ در حال حاضر امکان محاسبه اهمیت متغیرها وجود ندارد!")
-    
-except Exception as e:
-    st.error(f"خطا در نمایش اهمیت متغیرها: {str(e)}")
+    if st.button("🔍 استخراج Attention Weights", type="primary"):
+        if 'dl' in locals() and dl is not None:
+            try:
+                attention_weights = calculate_simple_attention_weights(tft, dl)
+                
+                if attention_weights is not None:
+                    # Display attention weights
+                    st.write("**وزن‌های Attention:**")
+                    
+                    # Create a simple visualization
+                    # The attention weights are a 1D array of size num_encoder_steps
+                    attention_df = pd.DataFrame({
+                        "step": range(len(attention_weights)),
+                        "attention_weight": attention_weights
+                    })
+                    
+                    # Streamlit bar chart
+                    st.bar_chart(attention_df.set_index("step")["attention_weight"])
+                    
+                    # Show table
+                    st.write("**جدول وزن‌های Attention:**")
+                    attention_df["attention_weight"] = attention_df["attention_weight"].round(4)
+                    attention_df["رتبه"] = range(1, len(attention_df) + 1)
+                    st.dataframe(attention_df[["رتبه", "step", "attention_weight"]], use_container_width=True)
+                    
+                else:
+                    st.warning("امکان استخراج وزن‌های attention وجود ندارد.")
+                    
+            except Exception as e:
+                st.error(f"خطا در استخراج Attention Weights: {e}")
+        else:
+            st.warning("ابتدا یک فروشگاه را انتخاب کنید و پیش‌بینی را اجرا کنید.")
+
+# Model Info
+st.markdown("---")
+st.subheader("ℹ️ اطلاعات مدل")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric("تعداد متغیرهای پیوسته", len(training.reals) if hasattr(training, 'reals') else 0)
+
+with col2:
+    st.metric("تعداد متغیرهای طبقه‌ای", len(training.categoricals) if hasattr(training, 'categoricals') else 0)
+
+with col3:
+    st.metric("طول پنجره پیش‌بینی", training.max_prediction_length if hasattr(training, 'max_prediction_length') else "نامشخص")
 
 st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
-
-
-
 
