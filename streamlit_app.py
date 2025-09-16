@@ -1,480 +1,631 @@
-# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
-from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-import altair as alt
 import torch
+import pickle
+import altair as alt
+from pytorch_forecasting import TemporalFusionTransformer
 import os
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+import math
+import copy
 
 # -----------------------------
-# Streamlit App Configuration
+# App config
 # -----------------------------
-st.set_page_config(layout="wide", page_title="InnovateMart Forecast")
-st.title("InnovateMart — پیش‌بینی فروش روزانه")
+st.set_page_config(layout="wide", page_title="InnovateMart Forecast Viewer")
+st.title("InnovateMart — مشاهدهٔ پیش‌بینی‌های TFT")
 
 # -----------------------------
-# File Paths
+# I/O utilities
 # -----------------------------
-DATA_PATH = "data/simulated_sales.csv"
-TRAIN_DS = "models/training_dataset.pkl"
-VAL_DS = "models/validation_dataset.pkl"
-VAL_RAW = "models/validation_raw.pkl"
-MODEL_STATE = "models/tft_ckpt.pth"
+@st.cache_resource
+def load_pickles(model_dir="models"):
+    paths = {
+        "training_ds": os.path.join(model_dir, "training_dataset.pkl"),
+        "validation_ds": os.path.join(model_dir, "validation_dataset.pkl"),
+        "validation_raw": os.path.join(model_dir, "validation_raw.pkl"),
+        "ckpt": os.path.join(model_dir, "tft_ckpt.pth"),
+    }
+    for k, p in paths.items():
+        if not os.path.exists(p):
+            st.error(f"فایل پیدا نشد: {p}")
+    with open(paths["training_ds"], "rb") as f:
+        training = pickle.load(f)
+    with open(paths["validation_ds"], "rb") as f:
+        validation = pickle.load(f)
+    with open(paths["validation_raw"], "rb") as f:
+        val_raw = pickle.load(f)
+    ckpt_path = paths["ckpt"]
+    return training, validation, val_raw, ckpt_path
 
 # -----------------------------
-# Check if files exist
+# Model build / load
 # -----------------------------
-def check_files():
-    files_needed = [DATA_PATH, TRAIN_DS, VAL_DS, VAL_RAW, MODEL_STATE]
-    missing_files = [f for f in files_needed if not os.path.exists(f)]
-    return missing_files
-
-missing = check_files()
-if missing:
-    st.error("⚠️ فایل‌های زیر وجود ندارند:")
-    for file in missing:
-        st.write(f"❌ {file}")
-    st.info("لطفاً ابتدا train_tft.py را اجرا کنید و فایل‌های لازم را در پوشه‌های مربوطه قرار دهید.")
-    st.stop()
-
-# -----------------------------
-# Feature Importance Functions
-# -----------------------------
-def calculate_permutation_importance(model, dataloader, n_repeats=5):
-    """Calculate permutation importance for model features"""
-    
-    # Get baseline predictions and performance
-    baseline_preds = []
-    true_values = []
-    
-    model.eval()
-    with torch.no_grad():
-        for x, y in dataloader:
-            # FIX: Access the prediction tensor from the model's Output object
-            pred_output = model(x)
-            pred_tensor = pred_output.prediction
-            baseline_preds.append(pred_tensor.cpu().numpy())
-            true_values.append(y[0].cpu().numpy())  # target is first element
-    
-    baseline_preds = np.concatenate(baseline_preds, axis=0)
-    true_values = np.concatenate(true_values, axis=0)
-    
-    # Calculate baseline MAE
-    baseline_mae = mean_absolute_error(true_values.flatten(), baseline_preds.flatten())
-    
-    # Get feature names
-    feature_names = []
-    if hasattr(dataloader.dataset, 'reals'):
-        feature_names.extend(dataloader.dataset.reals)
-    if hasattr(dataloader.dataset, 'categoricals'):
-        feature_names.extend(dataloader.dataset.categoricals)
-    
-    importance_scores = {}
-    
-    st.write(f"📊 محاسبه اهمیت متغیرها (MAE پایه: {baseline_mae:.4f})")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Calculate importance for each feature
-    # Permuting only a subset of features for demonstration
-    features_to_check = [f for f in feature_names if f not in ['date']] 
-    
-    for feat_idx, feature_name in enumerate(features_to_check):
-        status_text.text(f"در حال محاسبه اهمیت برای: {feature_name}")
-        
-        importance_values = []
-        
-        for repeat in range(n_repeats):
-            permuted_preds = []
-            
-            model.eval()
-            with torch.no_grad():
-                for x, y in dataloader:
-                    # Create a deep copy of the input dictionary to avoid side effects
-                    x_permuted = {key: value.clone() for key, value in x.items()}
-                    
-                    # Permute the feature if it exists in continuous variables
-                    if feature_name in dataloader.dataset.reals:
-                        feat_pos = dataloader.dataset.reals.index(feature_name)
-                        if 'encoder_cont' in x_permuted:
-                            perm_indices = torch.randperm(x_permuted['encoder_cont'].shape[0])
-                            x_permuted['encoder_cont'][:, :, feat_pos] = x_permuted['encoder_cont'][perm_indices, :, feat_pos]
-                        if 'decoder_cont' in x_permuted:
-                            perm_indices = torch.randperm(x_permuted['decoder_cont'].shape[0])
-                            x_permuted['decoder_cont'][:, :, feat_pos] = x_permuted['decoder_cont'][perm_indices, :, feat_pos]
-                    
-                    # Permute for categorical variables (requires a different approach)
-                    elif feature_name in dataloader.dataset.categoricals:
-                        feat_pos = dataloader.dataset.categoricals.index(feature_name)
-                        if 'encoder_cat' in x_permuted:
-                            perm_indices = torch.randperm(x_permuted['encoder_cat'].shape[0])
-                            x_permuted['encoder_cat'][:, :, feat_pos] = x_permuted['encoder_cat'][perm_indices, :, feat_pos]
-                        if 'decoder_cat' in x_permuted:
-                            perm_indices = torch.randperm(x_permuted['decoder_cat'].shape[0])
-                            x_permuted['decoder_cat'][:, :, feat_pos] = x_permuted['decoder_cat'][perm_indices, :, feat_pos]
-
-                    # FIX: Access the prediction tensor
-                    pred_permuted_output = model(x_permuted)
-                    pred_permuted_tensor = pred_permuted_output.prediction
-                    permuted_preds.append(pred_permuted_tensor.cpu().numpy())
-            
-            permuted_preds = np.concatenate(permuted_preds, axis=0)
-            permuted_mae = mean_absolute_error(true_values.flatten(), permuted_preds.flatten())
-            importance_values.append(permuted_mae - baseline_mae)
-        
-        importance_scores[feature_name] = np.mean(importance_values)
-        progress_bar.progress((feat_idx + 1) / len(features_to_check))
-    
-    status_text.text("محاسبه اهمیت متغیرها تکمیل شد! ✅")
-    return importance_scores
-
-def calculate_simple_attention_weights(model, dataloader):
-    """Extract attention weights from the model if available"""
-    model.eval()
-    attention_weights = []
-    
-    with torch.no_grad():
-        for x, _ in dataloader:
-            # FIX: Use tft.predict with return_attention=True for consistency
-            try:
-                raw_output = model.predict(x, mode="raw", return_attention=True)
-                # The attention weights are in raw_output.attention
-                attention_weights.append(raw_output.attention.cpu().numpy())
-            except Exception as e:
-                st.warning(f"Unable to extract attention weights. Error: {e}")
-                return None
-    
-    if attention_weights:
-        # The attention weights are typically [batch_size, num_heads, num_queries, num_keys]
-        # We average over batches and heads
-        return np.mean(np.concatenate(attention_weights, axis=0), axis=(0, 1))
-    return None
-
-# -----------------------------
-# Helpers: load data & artifacts
-# -----------------------------
-@st.cache_data
-def load_data(path=DATA_PATH):
-    try:
-        df = pd.read_csv(path, parse_dates=["date"])
-        df = df.sort_values(["store_id", "date"]).reset_index(drop=True)
-        df["store_id"] = df["store_id"].astype(str)
-        return df
-    except Exception as e:
-        st.error(f"خطا در بارگذاری داده‌ها: {e}")
-        return None
+from pytorch_forecasting.metrics import QuantileLoss
 
 @st.cache_resource
-def load_artifacts():
-    try:
-        with open(TRAIN_DS, "rb") as f:
-            training = pickle.load(f)
-        with open(VAL_DS, "rb") as f:
-            validation = pickle.load(f)
-        with open(VAL_RAW, "rb") as f:
-            validation_raw = pickle.load(f)
-
-        # Handle validation_raw format
-        if not isinstance(validation_raw, pd.DataFrame):
-            if isinstance(validation_raw, (list, tuple)) and len(validation_raw) > 0:
-                for el in validation_raw:
-                    if isinstance(el, pd.DataFrame):
-                        validation_raw = el
-                        break
-
-        # Load model
-        tft = TemporalFusionTransformer.from_dataset(
-            training,
-            learning_rate=1e-3,
-            hidden_size=16,
-            attention_head_size=1,
-            dropout=0.1,
-            hidden_continuous_size=8,
-            loss=None,
-        )
-        state = torch.load(MODEL_STATE, map_location=torch.device("cpu"))
-        tft.load_state_dict(state)
-        tft.eval() # Set model to evaluation mode after loading
-        return training, validation, validation_raw, tft
-    except Exception as e:
-        st.error(f"خطا در بارگذاری مدل: {e}")
-        return None
+def build_and_load_model(_training_ds, ckpt_path, device="cpu"):
+    tft = TemporalFusionTransformer.from_dataset(
+        _training_ds,
+        learning_rate=1e-3,
+        hidden_size=16,
+        attention_head_size=1,
+        dropout=0.1,
+        hidden_continuous_size=8,
+        log_interval=10,
+        reduce_on_plateau_patience=2,
+        loss=QuantileLoss(quantiles=[0.5]),
+    )
+    state = torch.load(ckpt_path, map_location=device)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    tft.load_state_dict(state)
+    tft.to(device)
+    tft.eval()
+    return tft
 
 # -----------------------------
-# Load everything
+# Prediction helpers
 # -----------------------------
-df = load_data()
-if df is None:
-    st.stop()
 
-artifacts = load_artifacts()
-if artifacts is None:
-    st.stop()
+def predict_on_validation(tft, validation_ds, batch_size=64, device="cpu"):
+    val_dl = validation_ds.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+    preds = tft.predict(val_dl)
+    return preds
 
-training, validation, validation_raw, tft = artifacts
 
-# -----------------------------
-# UI: store selection
-# -----------------------------
-store_ids = sorted(df["store_id"].unique().astype(str).tolist())
-sel = st.selectbox("انتخاب store_id:", store_ids)
+def map_preds_to_dates_fixed(preds, validation_raw, validation_ds):
+    """
+    نگاشت پیش‌بینی‌ها به فروشگاه‌ها و تاریخ‌ها (برای همه فروشگاه‌ها)
+    """
+    rows = []
+    stores = validation_raw["store_id"].unique()
+    horizon = preds.shape[1]
 
-# -----------------------------
-# Historical Sales chart
-# -----------------------------
-store_df = df[df["store_id"].astype(str) == str(sel)].copy()
-st.subheader("فروش تاریخی")
+    for i, store in enumerate(stores):
+        store_min_time = validation_raw.loc[validation_raw["store_id"] == store, "time_idx"].max() - horizon + 1
+        for h in range(horizon):
+            time_idx = store_min_time + h
+            rows.append({
+                "store_id": store,
+                "time_idx": time_idx,
+                "pred": float(preds[i, h]),
+                "horizon_step": h
+            })
 
-if store_df.empty:
-    st.info("برای این فروشگاه دادهٔ تاریخی وجود ندارد.")
-else:
-    chart_hist = alt.Chart(store_df).mark_line().encode(
-        x=alt.X("date:T", title="تاریخ"),
-        y=alt.Y("daily_sales:Q", title="فروش")
-    ).properties(height=300)
-    st.altair_chart(chart_hist, use_container_width=True)
+    pred_df = pd.DataFrame(rows)
+    time_to_date = validation_raw[["time_idx", "date"]].drop_duplicates()
+    pred_df = pred_df.merge(time_to_date, on="time_idx", how="left")
 
-# -----------------------------
-# Forecast on validation set for selected store
-# -----------------------------
-st.subheader("پیش‌بینی روی مجموعهٔ اعتبارسنجی")
-
-if not isinstance(validation_raw, pd.DataFrame):
-    st.error("validation_raw موجود نیست یا فرمت آن پشتیبانی نمی‌شود.")
-    st.stop()
-
-val_store = validation_raw[validation_raw["store_id"].astype(str) == str(sel)].copy()
-
-if val_store.empty:
-    st.info("برای این فروشگاه دادهٔ اعتبارسنجی وجود ندارد.")
-else:
-    try:
-        # Build dataset & dataloader for this store
-        pred_ds = TimeSeriesDataSet.from_dataset(training, val_store, predict=True, stop_randomization=True)
-        dl = pred_ds.to_dataloader(train=False, batch_size=1, num_workers=0)
-
-        # Get predictions
-        with st.spinner("در حال پیش‌بینی..."):
-            raw_output = tft.predict(dl, mode="raw", return_x=True)
-
-        # Extract predictions tensor
-        try:
-            preds_tensor = raw_output.output.prediction
-        except:
-            preds_tensor = raw_output.output
-
-        if preds_tensor.ndim == 3 and preds_tensor.shape[-1] == 1:
-            preds_tensor = preds_tensor.squeeze(-1)
-
-        predictions = preds_tensor.detach().cpu().numpy() if hasattr(preds_tensor, "detach") else np.array(preds_tensor)
-
-        x = raw_output.x
-        unique_dates = np.array(df["date"].sort_values().unique())
-        max_pred_len = pred_ds.max_prediction_length
-        encoder_length = pred_ds.max_encoder_length
-
-        rows = []
-        decoder_time_idx = x.get("decoder_time_idx", None)
-        encoder_time_idx = x.get("encoder_time_idx", None)
-
-        for i in range(len(predictions)):
-            if decoder_time_idx is not None:
-                d0 = decoder_time_idx[i, 0].item() if hasattr(decoder_time_idx, "shape") else int(decoder_time_idx[i][0])
-                start_time_idx = d0 - encoder_length
-            elif encoder_time_idx is not None:
-                enc_last = encoder_time_idx[i, -1].item() if hasattr(encoder_time_idx, "shape") else int(encoder_time_idx[i][-1])
-                start_time_idx = enc_last - encoder_length + 1
-            else:
-                start_time_idx = 0
-
-            pred_vals = predictions[i]
-            for h in range(max_pred_len):
-                abs_time_idx = start_time_idx + encoder_length + h
-                date = unique_dates[abs_time_idx] if 0 <= abs_time_idx < len(unique_dates) else None
-                rows.append({
-                    "window": i,
-                    "horizon": h + 1,
-                    "predicted_sales": float(pred_vals[h]),
-                    "date": pd.to_datetime(date) if date is not None else pd.NaT
-                })
-
-        pred_df = pd.DataFrame(rows)
-
-        st.write("نمونهٔ خروجی پیش‌بینی")
-        st.dataframe(pred_df.head(20))
-
-        # Prepare overlay chart
-        actuals = store_df[["date", "daily_sales"]].rename(columns={"daily_sales": "sales"}).copy()
-        actuals["type"] = "actual"
-        actuals["horizon"] = 0
-
-        preds_clean = pred_df.dropna(subset=["date"]).copy()
-        preds_clean = preds_clean.rename(columns={"predicted_sales": "sales"})
-        preds_clean["type"] = "predicted"
-
-        actuals["date"] = pd.to_datetime(actuals["date"])
-        preds_clean["date"] = pd.to_datetime(preds_clean["date"])
-
-        combined = pd.concat([
-            actuals[["date", "sales", "type", "horizon"]],
-            preds_clean[["date", "sales", "type", "horizon"]]
-        ], ignore_index=True)
-
-        combined = combined.sort_values("date").reset_index(drop=True)
-
-        overlay_chart = alt.Chart(combined).mark_line(opacity=0.8).encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("sales:Q", title="Sales"),
-            color=alt.Color("type:N", title="Legend",
-                            scale=alt.Scale(domain=["actual", "predicted"], range=["#1f77b4", "#ff7f0e"])),
-            detail="horizon:N",
-            tooltip=["date:T", "sales:Q", "type:N", "horizon:N"]
-        ).properties(
-            width=900,
-            height=420,
-            title=f"فروش تاریخی و پیش‌بینی‌شده برای store_id={sel}"
-        ).interactive()
-
-        st.altair_chart(overlay_chart, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"خطا در پیش‌بینی: {e}")
-        st.write("جزئیات خطا:", str(e))
+    actuals = validation_raw[["store_id", "time_idx", "date", "daily_sales"]].drop_duplicates()
+    merged = pred_df.merge(actuals, on=["store_id", "time_idx"], how="left", suffixes=("", "_actual"))
+    merged["date"] = merged["date_actual"].fillna(merged["date"])
+    merged = merged.drop(columns=["date_actual"], errors="ignore")
+    return merged
 
 # -----------------------------
-# Enhanced Variable Importance Section
+# Plotting utilities
 # -----------------------------
-st.markdown("---")
-st.subheader("🎯 اهمیت متغیرها (Feature Importance)")
 
-# Create tabs for different importance methods
-tab1, tab2, tab3 = st.tabs(["📋 لیست متغیرها", "🔄 Permutation Importance", "🧠 Attention Weights"])
-
-with tab1:
-    st.write("### متغیرهای ورودی مدل")
-    
-    # Continuous variables
-    continuous_vars = training.reals if hasattr(training, 'reals') else []
-    if continuous_vars:
-        st.write("**متغیرهای پیوسته:**")
-        for i, var in enumerate(continuous_vars, 1):
-            st.write(f"{i}. `{var}`")
-    
-    # Categorical variables  
-    categorical_vars = training.categoricals if hasattr(training, 'categoricals') else []
-    if categorical_vars:
-        st.write("**متغیرهای طبقه‌ای:**")
-        for i, var in enumerate(categorical_vars, 1):
-            st.write(f"{i}. `{var}`")
+def plot_store_comparison(merged_df, store=None, aggregate=False):
+    if aggregate:
+        df_plot = merged_df.groupby("date").agg(
+            actual=("daily_sales", "sum"),
+            pred=("pred", "sum")
+        ).reset_index()
+        title_suffix = "(تجمیعی - همه فروشگاه‌ها)"
     else:
-        st.write("**متغیرهای طبقه‌ای:** هیچ متغیر طبقه‌ای تعریف نشده")
-    
-    # Time-varying variables
-    time_vars = training.time_varying_known_reals if hasattr(training, 'time_varying_known_reals') else []
-    if time_vars:
-        st.write("**متغیرهای متغیر با زمان:**")
-        for i, var in enumerate(time_vars, 1):
-            st.write(f"{i}. `{var}`")
+        if store is None:
+            available_stores = merged_df["store_id"].unique()
+            if len(available_stores) > 0:
+                store = available_stores[0]
+            else:
+                st.warning("هیچ فروشگاهی در داده‌ها یافت نشد!")
+                return
 
-with tab2:
-    st.write("### محاسبه Permutation Importance")
-    st.info("این روش اهمیت هر متغیر را با اندازه‌گیری تغییر عملکرد مدل پس از تصادفی کردن آن متغیر محاسبه می‌کند.")
-    
-    if st.button("🚀 محاسبه Permutation Importance", type="primary"):
-        if 'dl' in locals() and dl is not None:
-            try:
-                importance_scores = calculate_permutation_importance(tft, dl, n_repeats=3)
-                
-                if importance_scores:
-                    # Create DataFrame for plotting
-                    importance_df = pd.DataFrame([
-                        {"feature": k, "importance": v} for k, v in importance_scores.items()
-                    ]).sort_values("importance", ascending=False)
-                    
-                    # Streamlit bar chart
-                    st.write("**نمودار اهمیت متغیرها:**")
-                    st.bar_chart(importance_df.set_index("feature")["importance"])
-                    
-                    # Show table
-                    st.write("**جدول اهمیت متغیرها:**")
-                    importance_df["importance"] = importance_df["importance"].round(4)
-                    importance_df["رتبه"] = range(1, len(importance_df) + 1)
-                    st.dataframe(importance_df[["رتبه", "feature", "importance"]], use_container_width=True)
-                    
-                    # Interpretation
-                    st.write("**تفسیر نتایج:**")
-                    top_feature = importance_df.iloc[0]
-                    st.success(f"🏆 مهم‌ترین متغیر: `{top_feature['feature']}` با امتیاز {top_feature['importance']:.4f}")
-                    
-                    positive_features = importance_df[importance_df["importance"] > 0]
-                    if len(positive_features) > 0:
-                        st.info(f"📈 تعداد متغیرهای مؤثر (مثبت): {len(positive_features)}")
-                    
-                    negative_features = importance_df[importance_df["importance"] < 0]  
-                    if len(negative_features) > 0:
-                        st.warning(f"📉 متغیرهای با تأثیر منفی: {len(negative_features)}")
-                    
-                else:
-                    st.warning("امکان محاسبه اهمیت متغیرها وجود ندارد.")
-                    
-            except Exception as e:
-                st.error(f"خطا در محاسبه Permutation Importance: {e}")
+        store_data = merged_df[merged_df["store_id"] == store]
+        if store_data.empty:
+            st.warning(f"داده‌ای برای فروشگاه {store} یافت نشد!")
+            return
+
+        df_plot = store_data.groupby("date").agg(
+            actual=("daily_sales", "mean"),
+            pred=("pred", "mean")
+        ).reset_index()
+        title_suffix = f"(فروشگاه {store})"
+
+    if df_plot.empty:
+        st.warning(f"داده‌ای برای نمایش یافت نشد {title_suffix}")
+        return
+
+    has_actual = not df_plot['actual'].isna().all()
+
+    if has_actual:
+        df_long = df_plot.melt(id_vars=["date"], value_vars=["actual", "pred"],
+                              var_name="kind", value_name="sales")
+        color_scale = alt.Scale(domain=['actual', 'pred'], range=['#1f77b4', '#ff7f0e'])
+        chart = alt.Chart(df_long).mark_line(point=True, strokeWidth=2).encode(
+            x=alt.X("date:T", title="تاریخ"),
+            y=alt.Y("sales:Q", title="فروش"),
+            color=alt.Color("kind:N", title="نوع", scale=color_scale),
+            tooltip=["date:T", "kind:N", "sales:Q"]
+        ).properties(width=900, height=400, title=f"مقایسه فروش واقعی و پیش‌بینی {title_suffix}")
+    else:
+        chart = alt.Chart(df_plot).mark_line(point=True, strokeWidth=2).encode(
+            x=alt.X("date:T", title="تاریخ"),
+            y=alt.Y("pred:Q", title="فروش پیش‌بینی شده"),
+            tooltip=["date:T", "pred:Q"]
+        ).properties(width=900, height=400, title=f"پیش‌بینی فروش {title_suffix}")
+
+    st.altair_chart(chart, use_container_width=True)
+
+# -----------------------------
+# Permutation feature importance (robust)
+# -----------------------------
+
+def permute_feature_in_batch(x, feature_name, encoder_vars, decoder_vars):
+    """
+    permute کردن یک ویژگی در x (فقط x، نه کل batch).
+    خروجی همان نوع ورودی را دارد.
+    """
+    if x is None:
+        return x
+
+    def _shuffle_along_batch(tensor):
+        if not torch.is_tensor(tensor) or tensor.shape[0] <= 1:
+            return tensor
+        idx = torch.randperm(tensor.shape[0], device=tensor.device)
+        return tensor[idx].clone()
+
+    # dict (رایج‌ترین حالت برای pytorch-forecasting)
+    if isinstance(x, dict):
+        x_copy = {}
+        if feature_name in encoder_vars:
+            feature_idx = encoder_vars.index(feature_name)
+            section = "encoder"
+        elif feature_name in decoder_vars:
+            feature_idx = decoder_vars.index(feature_name)
+            section = "decoder"
         else:
-            st.warning("ابتدا یک فروشگاه را انتخاب کنید و پیش‌بینی را اجرا کنید.")
+            return {k: (v.clone() if torch.is_tensor(v) else v) for k, v in x.items()}
 
-with tab3:
-    st.write("### وزن‌های Attention")
-    st.info("این بخش وزن‌های attention مدل Temporal Fusion Transformer را نمایش می‌دهد.")
-    
-    if st.button("🔍 استخراج Attention Weights", type="primary"):
-        if 'dl' in locals() and dl is not None:
-            try:
-                attention_weights = calculate_simple_attention_weights(tft, dl)
-                
-                if attention_weights is not None:
-                    # Display attention weights
-                    st.write("**وزن‌های Attention:**")
-                    
-                    # Create a simple visualization
-                    # The attention weights are a 1D array of size num_encoder_steps
-                    attention_df = pd.DataFrame({
-                        "step": range(len(attention_weights)),
-                        "attention_weight": attention_weights
-                    })
-                    
-                    # Streamlit bar chart
-                    st.bar_chart(attention_df.set_index("step")["attention_weight"])
-                    
-                    # Show table
-                    st.write("**جدول وزن‌های Attention:**")
-                    attention_df["attention_weight"] = attention_df["attention_weight"].round(4)
-                    attention_df["رتبه"] = range(1, len(attention_df) + 1)
-                    st.dataframe(attention_df[["رتبه", "step", "attention_weight"]], use_container_width=True)
-                    
+        # continuous
+        if section == "encoder" and "encoder_cont" in x and torch.is_tensor(x["encoder_cont"]):
+            ec = x["encoder_cont"].clone()
+            if ec.ndim >= 3 and feature_idx < ec.shape[-1]:
+                vals = ec[:, :, feature_idx]
+                perm_idx = torch.randperm(vals.shape[0], device=vals.device)
+                ec[:, :, feature_idx] = vals[perm_idx]
+                x_copy.update(x)
+                x_copy["encoder_cont"] = ec
+                return x_copy
+
+        if section == "decoder" and "decoder_cont" in x and torch.is_tensor(x["decoder_cont"]):
+            dc = x["decoder_cont"].clone()
+            if dc.ndim >= 3 and feature_idx < dc.shape[-1]:
+                vals = dc[:, :, feature_idx]
+                perm_idx = torch.randperm(vals.shape[0], device=vals.device)
+                dc[:, :, feature_idx] = vals[perm_idx]
+                x_copy.update(x)
+                x_copy["decoder_cont"] = dc
+                return x_copy
+
+        # categorical
+        if section == "encoder" and "encoder_cat" in x and torch.is_tensor(x["encoder_cat"]):
+            ec = x["encoder_cat"].clone()
+            if ec.ndim >= 3 and feature_idx < ec.shape[-1]:
+                vals = ec[:, :, feature_idx]
+                perm_idx = torch.randperm(vals.shape[0], device=vals.device)
+                ec[:, :, feature_idx] = vals[perm_idx]
+                x_copy.update(x)
+                x_copy["encoder_cat"] = ec
+                return x_copy
+
+        if section == "decoder" and "decoder_cat" in x and torch.is_tensor(x["decoder_cat"]):
+            dc = x["decoder_cat"].clone()
+            if dc.ndim >= 3 and feature_idx < dc.shape[-1]:
+                vals = dc[:, :, feature_idx]
+                perm_idx = torch.randperm(vals.shape[0], device=vals.device)
+                dc[:, :, feature_idx] = vals[perm_idx]
+                x_copy.update(x)
+                x_copy["decoder_cat"] = dc
+                return x_copy
+
+        # fallback تلاش برای permute در هر tensor که آخرین بعدش >= feature_idx
+        x_copy.update(x)
+        for k, v in x.items():
+            if torch.is_tensor(v) and v.ndim >= 1 and v.shape[-1] > feature_idx:
+                try:
+                    v_new = v.clone()
+                    vals = v_new[..., feature_idx]
+                    perm_idx = torch.randperm(vals.shape[0], device=vals.device)
+                    v_new[..., feature_idx] = vals[perm_idx]
+                    x_copy[k] = v_new
+                    return x_copy
+                except Exception:
+                    continue
+
+        return {k: (v.clone() if torch.is_tensor(v) else v) for k, v in x.items()}
+
+    # tuple (مثلاً (encoder, decoder)) — پردازش هر قسمت
+    if isinstance(x, tuple):
+        out_parts = []
+        for part in x:
+            if isinstance(part, dict):
+                out_parts.append(permute_feature_in_batch(part, feature_name, encoder_vars, decoder_vars))
+            elif torch.is_tensor(part):
+                out_parts.append(_shuffle_along_batch(part))
+            else:
+                out_parts.append(part)
+        return tuple(out_parts)
+
+    # tensor ساده
+    if torch.is_tensor(x):
+        return _shuffle_along_batch(x)
+
+    return x
+
+
+def calculate_permutation_importance(tft, validation_ds, device="cpu", n_repeats=3):
+    """
+    محاسبه اهمیت ویژگی‌ها با روش permutation (نسخه فیکس شده)
+    """
+    val_dl = validation_ds.to_dataloader(train=False, batch_size=32, num_workers=0)
+
+    # baseline predictions
+    baseline_predictions = tft.predict(val_dl)
+
+    # دریافت actual values
+    actuals = []
+    for batch in val_dl:
+        if isinstance(batch, tuple) and len(batch) >= 2:
+            y = batch[1]
+            if isinstance(y, tuple):
+                y = y[0]
+            if torch.is_tensor(y):
+                actuals.append(y.detach().cpu().numpy())
+        elif hasattr(batch, "y") and torch.is_tensor(batch.y):
+            actuals.append(batch.y.detach().cpu().numpy())
+
+    if actuals:
+        actuals = np.concatenate(actuals, axis=0)
+        baseline_mse = mean_squared_error(actuals.flatten(), baseline_predictions.flatten())
+    else:
+        baseline_mse = np.var(baseline_predictions.flatten())
+        st.info("⚠️ actual values پیدا نشد — از variance predictions استفاده شد.")
+
+    encoder_vars = getattr(tft, "encoder_variables", []) or []
+    decoder_vars = getattr(tft, "decoder_variables", []) or []
+    all_features = list(dict.fromkeys(encoder_vars + decoder_vars))
+
+    importance_scores = {}
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, feature in enumerate(all_features):
+        status_text.text(f"در حال محاسبه اهمیت {feature}...")
+        feature_scores = []
+
+        for repeat in range(n_repeats):
+            val_dl_permuted = validation_ds.to_dataloader(train=False, batch_size=32, num_workers=0)
+            permuted_predictions = []
+
+            for batch in val_dl_permuted:
+                if isinstance(batch, tuple) and len(batch) >= 2:
+                    x, y = batch[0], batch[1]
                 else:
-                    st.warning("امکان استخراج وزن‌های attention وجود ندارد.")
-                    
-            except Exception as e:
-                st.error(f"خطا در استخراج Attention Weights: {e}")
-        else:
-            st.warning("ابتدا یک فروشگاه را انتخاب کنید و پیش‌بینی را اجرا کنید.")
+                    x, y = batch, None
 
-# Model Info
-st.markdown("---")
-st.subheader("ℹ️ اطلاعات مدل")
-col1, col2, col3 = st.columns(3)
+                # فقط x رو permute می‌کنیم
+                x_permuted = permute_feature_in_batch(x, feature, encoder_vars, decoder_vars)
 
-with col1:
-    st.metric("تعداد متغیرهای پیوسته", len(training.reals) if hasattr(training, 'reals') else 0)
+                with torch.no_grad():
+                    # مدل همیشه انتظار dict داره — اگر tuple شد، اولین عضو dict را امتحان کن
+                    if isinstance(x_permuted, tuple):
+                        x_input = x_permuted[0] if isinstance(x_permuted[0], dict) else x_permuted
+                    else:
+                        x_input = x_permuted
 
-with col2:
-    st.metric("تعداد متغیرهای طبقه‌ای", len(training.categoricals) if hasattr(training, 'categoricals') else 0)
+                    pred = tft(x_input)
 
-with col3:
-    st.metric("طول پنجره پیش‌بینی", training.max_prediction_length if hasattr(training, 'max_prediction_length') else "نامشخص")
+                    if isinstance(pred, dict):
+                        pred = pred.get("prediction", next(iter(pred.values())))
+                    if isinstance(pred, (list, tuple)):
+                        pred = pred[0]
+                    if torch.is_tensor(pred):
+                        permuted_predictions.append(pred.detach().cpu().numpy())
+                    else:
+                        permuted_predictions.append(np.asarray(pred))
 
-st.success("✅ اپلیکیشن با موفقیت بارگذاری شد!")
+            if len(permuted_predictions) == 0:
+                continue
 
+            permuted_predictions = np.concatenate(permuted_predictions, axis=0)
+
+            if actuals is not None and len(actuals) > 0:
+                permuted_mse = mean_squared_error(actuals.flatten(), permuted_predictions.flatten())
+            else:
+                permuted_mse = np.var(permuted_predictions.flatten())
+
+            feature_scores.append(permuted_mse - baseline_mse)
+
+        importance_scores[feature] = float(np.mean(feature_scores)) if feature_scores else 0.0
+        progress_bar.progress((idx + 1) / max(1, len(all_features)))
+
+    progress_bar.empty()
+    status_text.empty()
+    return importance_scores
+
+# -----------------------------
+# Session state initialization
+# -----------------------------
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
+    st.session_state.available_stores = []
+
+# -----------------------------
+# Sidebar / UI controls
+# -----------------------------
+st.sidebar.header("تنظیمات")
+model_dir = st.sidebar.text_input("مسیر پوشهٔ مدل", value="models")
+device_opt = st.sidebar.selectbox("Device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+batch_size = st.sidebar.slider("Batch size برای پیش‌بینی", min_value=16, max_value=256, value=64, step=16)
+
+display_mode = st.sidebar.radio(
+    "نوع نمایش",
+    ["تجمیعی (همه فروشگاه‌ها)", "فروشگاه خاص"],
+    index=0
+)
+
+aggregate = display_mode == "تجمیعی (همه فروشگاه‌ها)"
+
+selected_store = None
+if not aggregate and st.session_state.data_loaded:
+    selected_store = st.sidebar.selectbox(
+        "انتخاب فروشگاه",
+        options=st.session_state.available_stores,
+        index=0 if st.session_state.available_stores else None
+    )
+
+# -----------------------------
+# Main flow: load, predict, show
+# -----------------------------
+if st.button("بارگذاری مدل و اجرا"):
+    with st.spinner("در حال بارگذاری فایل‌ها و مدل..."):
+        try:
+            training_ds, validation_ds, validation_raw, ckpt_path = load_pickles(model_dir)
+
+            # debug info
+            st.write("### اطلاعات دیباگ")
+            st.write(f"تعداد رکوردهای validation_raw: {len(validation_raw)}")
+            st.write(f"فروشگاه‌های موجود: {validation_raw['store_id'].unique()}")
+            st.write(f"بازه time_idx: {validation_raw['time_idx'].min()} تا {validation_raw['time_idx'].max()}")
+            st.write(f"بازه تاریخ: {validation_raw['date'].min()} تا {validation_raw['date'].max()}")
+
+            st.session_state.available_stores = sorted(validation_raw["store_id"].unique().tolist())
+            st.session_state.data_loaded = True
+
+            tft = build_and_load_model(training_ds, ckpt_path, device=device_opt)
+            st.success("مدل بارگذاری شد.")
+
+            preds = predict_on_validation(tft, validation_ds, batch_size=batch_size, device=device_opt)
+            st.write("شکل پیش‌بینی‌ها:", preds.shape)
+
+            merged = map_preds_to_dates_fixed(preds, validation_raw, validation_ds)
+
+            if merged.empty:
+                st.error("نتیجهٔ نگاشت خالی شد!")
+            else:
+                st.write(f"تعداد رکوردهای نگاشت یافته: {len(merged)}")
+                st.write("نمونه از داده‌های نگاشت یافته:")
+                st.dataframe(merged.head(10))
+
+                st.session_state.merged_data = merged
+                st.session_state.tft_model = tft
+                st.session_state.validation_ds = validation_ds
+
+                # metrics + plots
+                if aggregate:
+                    df_eval = merged.groupby("date").agg(actual=("daily_sales", "sum"), pred=("pred", "sum")).dropna(subset=['actual'])
+                    if not df_eval.empty:
+                        y_true = df_eval["actual"].values
+                        y_pred = df_eval["pred"].values
+                        mae_val = mean_absolute_error(y_true, y_pred)
+                        rmse_val = math.sqrt(mean_squared_error(y_true, y_pred))
+                        col1, col2 = st.columns(2)
+                        col1.metric("MAE (تجمیعی)", f"{mae_val:.3f}")
+                        col2.metric("RMSE (تجمیعی)", f"{rmse_val:.3f}")
+                    else:
+                        st.info("داده واقعی برای محاسبه متریک‌ها موجود نیست.")
+                    st.markdown("### نمودار واقعی vs پیش‌بینی (تجمیعی)")
+                    plot_store_comparison(merged, aggregate=True)
+                else:
+                    if selected_store is None and st.session_state.available_stores:
+                        selected_store = st.session_state.available_stores[0]
+                        st.info(f"فروشگاه {selected_store} به طور خودکار انتخاب شد.")
+
+                    if selected_store is not None:
+                        st.markdown(f"### نتایج فروشگاه {selected_store}")
+                        store_data = merged[merged["store_id"] == selected_store]
+                        if store_data.empty:
+                            st.error(f"هیچ داده‌ای برای فروشگاه {selected_store} یافت نشد!")
+                        else:
+                            st.write(f"تعداد رکوردهای فروشگاه {selected_store}: {len(store_data)}")
+                            df_eval = store_data.dropna(subset=['daily_sales'])
+                            if not df_eval.empty:
+                                y_true = df_eval["daily_sales"].values
+                                y_pred = df_eval["pred"].values
+                                mae_val = mean_absolute_error(y_true, y_pred)
+                                rmse_val = math.sqrt(mean_squared_error(y_true, y_pred))
+                                col1, col2 = st.columns(2)
+                                col1.metric(f"MAE (فروشگاه {selected_store})", f"{mae_val:.3f}")
+                                col2.metric(f"RMSE (فروشگاه {selected_store})", f"{rmse_val:.3f}")
+                            else:
+                                st.info(f"داده واقعی برای فروشگاه {selected_store} موجود نیست.")
+
+                            plot_store_comparison(merged, store=selected_store, aggregate=False)
+                    else:
+                        st.warning("هیچ فروشگاهی برای انتخاب موجود نیست.")
+
+                # summary
+                st.markdown("### آمار کلی")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("تعداد فروشگاه‌ها", len(merged["store_id"].unique()))
+                col2.metric("تعداد روزهای پیش‌بینی", len(merged["date"].unique()))
+                col3.metric("تعداد کل رکوردهای پیش‌بینی", len(merged))
+
+                st.markdown("### خلاصه پیش‌بینی‌ها برای هر فروشگاه")
+                summary = merged.groupby('store_id').agg({
+                    'pred': ['count', 'mean', 'std'],
+                    'daily_sales': ['count', 'mean', 'std']
+                }).round(2)
+                summary.columns = [f"{col[1]}_{col[0]}" if col[1] else col[0] for col in summary.columns]
+                st.dataframe(summary)
+
+        except Exception as e:
+            st.error(f"خطا در اجرای برنامه: {str(e)}")
+            st.exception(e)
+
+# -----------------------------
+# Feature importance UI
+# -----------------------------
+if st.session_state.data_loaded:
+    st.markdown("---")
+    st.markdown("## اهمیت ویژگی‌ها")
+    tab1, tab2 = st.tabs(["روش کلاسیک TFT", "روش Permutation"])
+
+    with tab1:
+        st.markdown("### روش کلاسیک TFT (interpret_output)")
+        if st.button("محاسبه اهمیت ویژگی‌ها (کلاسیک)"):
+            with st.spinner("در حال محاسبه اهمیت ویژگی‌ها..."):
+                try:
+                    training_ds, validation_ds, validation_raw, ckpt_path = load_pickles(model_dir)
+                    tft = build_and_load_model(training_ds, ckpt_path, device=device_opt)
+                    val_dl = validation_ds.to_dataloader(train=False, batch_size=min(batch_size, 32), num_workers=0)
+                    st.info("در حال محاسبه raw predictions...")
+                    raw_predictions, x, *_ = tft.predict(val_dl, mode="raw", return_x=True)
+                    st.info("در حال تفسیر نتایج...")
+                    interpretation = tft.interpret_output(raw_predictions, reduction="mean")
+                    st.success("محاسبه اهمیت ویژگی‌ها کامل شد!")
+                    st.write("**کلیدهای موجود در interpretation:**")
+                    st.write(list(interpretation.keys()))
+                    if "attention" in interpretation:
+                        st.subheader("نقشه توجه (Attention Map)")
+                        attention = interpretation["attention"]
+                        st.write(f"شکل attention: {attention.shape}")
+                    if hasattr(tft, 'encoder_variables') and hasattr(tft, 'decoder_variables'):
+                        st.subheader("ویژگی‌های مدل")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Encoder Variables:**")
+                            st.write(tft.encoder_variables)
+                        with col2:
+                            st.write("**Decoder Variables:**")
+                            st.write(tft.decoder_variables)
+                    available_keys = [k for k in interpretation.keys() if 'importance' in k.lower()]
+                    if not available_keys:
+                        st.warning("هیچ اطلاعات اهمیت ویژگی یافت نشد در روش کلاسیک.")
+                        st.info("لطفا از روش Permutation استفاده کنید.")
+                except Exception as e:
+                    st.error(f"خطا در محاسبه اهمیت ویژگی‌ها: {str(e)}")
+                    st.exception(e)
+
+    with tab2:
+        st.markdown("### روش Permutation Importance")
+        col1, col2 = st.columns(2)
+        with col1:
+            n_repeats = st.slider("تعداد تکرار برای هر ویژگی", min_value=1, max_value=10, value=3, help="تعداد بیشتر = نتیجه دقیق‌تر اما زمان بیشتر")
+        with col2:
+            use_sample = st.checkbox("استفاده از نمونه کوچک", value=True, help="برای سرعت بیشتر، فقط قسمتی از داده‌ها استفاده شود")
+
+        if st.button("محاسبه اهمیت ویژگی‌ها (Permutation Method)"):
+            with st.spinner("در حال محاسبه اهمیت ویژگی‌ها با روش Permutation..."):
+                try:
+                    training_ds, validation_ds, validation_raw, ckpt_path = load_pickles(model_dir)
+                    tft = build_and_load_model(training_ds, ckpt_path, device=device_opt)
+                    if use_sample:
+                        st.info(f"استفاده از batch size کوچک برای تسریع محاسبات...")
+                    importance_scores = calculate_permutation_importance(tft, validation_ds, device=device_opt, n_repeats=n_repeats)
+                    if importance_scores:
+                        df_importance = pd.DataFrame([{"feature": feature, "importance": score} for feature, score in importance_scores.items()]).sort_values("importance", ascending=False)
+                        st.success("محاسبه اهمیت ویژگی‌ها با روش Permutation کامل شد!")
+                        st.subheader("🎯 اهمیت ویژگی‌ها (Permutation Importance)")
+                        st.dataframe(df_importance, use_container_width=True)
+                        chart = alt.Chart(df_importance).mark_bar().encode(x=alt.X("importance:Q", title="اهمیت (افزایش MSE)"), y=alt.Y("feature:N", sort="-x", title="ویژگی"), color=alt.Color("importance:Q", scale=alt.Scale(scheme="viridis")), tooltip=["feature:N", "importance:Q"]).properties(width=800, height=400, title="اهمیت ویژگی‌ها بر اساس روش Permutation")
+                        st.altair_chart(chart, use_container_width=True)
+                        st.markdown("### 📊 تفسیر نتایج:")
+                        top_features = df_importance.head(3)
+                        st.markdown("**🏆 مهم‌ترین ویژگی‌ها:**")
+                        for idx, row in top_features.iterrows():
+                            feature = row['feature']
+                            importance = row['importance']
+                            if importance > 0:
+                                st.markdown(f"- **{feature}**: افزایش {importance:.4f} در MSE (ویژگی مهم)")
+                            else:
+                                st.markdown(f"- **{feature}**: کاهش {abs(importance):.4f} در MSE (ممکن است noise باشد)")
+                        with st.expander("💡 راهنمای تفسیر نتایج"):
+                            st.markdown("""
+                            **نحوه تفسیر Permutation Importance:**
+                            - **مقدار مثبت**: با تغییر تصادفی این ویژگی، دقت مدل کاهش می‌یابد → ویژگی مهم است
+                            - **مقدار منفی**: با تغییر تصادفی این ویژگی، دقت مدل بهتر می‌شود → ممکن است ویژگی noise یا غیرمهم باشد
+                            - **مقدار نزدیک صفر**: ویژگی تاثیر چندانی بر مدل ندارد
+                            **ویژگی‌های معمولاً مهم در پیش‌بینی فروش:**
+                            - `daily_sales`: مقدار فروش قبلی (target)
+                            - `sales_lag_7`, `sales_lag_30`: فروش با تاخیر
+                            - `sales_ma_7`, `sales_ma_30`: میانگین متحرک فروش
+                            - `day_of_week`: روز هفته
+                            - `promotion_active`: وضعیت تخفیف
+                            """)
+                        st.download_button(label="📥 دانلود نتایج (CSV)", data=df_importance.to_csv(index=False).encode('utf-8'), file_name=f"feature_importance_permutation_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+                    else:
+                        st.error("محاسبه اهمیت ویژگی‌ها انجام نشد!")
+                except Exception as e:
+                    st.error(f"خطا در محاسبه Permutation Importance: {str(e)}")
+                    st.exception(e)
+                    with st.expander("🔧 راهنمای رفع مشکل"):
+                        st.markdown("""
+                        **مشکلات احتمالی و راه حل:**
+                        1. **کمبود حافظه**: 
+                           - تعداد تکرار را کم کنید
+                           - گزینه "استفاده از نمونه کوچک" را فعال کنید
+                           - batch size را کاهش دهید
+                        2. **مشکل در ساختار batch**:
+                           - ممکن است نیاز به تطبیق کد با ساختار خاص مدل شما باشد
+                           - بررسی کنید که آیا نام ویژگی‌ها درست است
+                        3. **زمان زیاد محاسبه**:
+                           - تعداد تکرار را به 1 یا 2 کاهش دهید
+                           - از نمونه کوچک‌تر استفاده کنید
+                        """)
+
+st.success("پایان.")
+
+# -----------------------------
+# Usage help when not loaded
+# -----------------------------
+if not st.session_state.data_loaded:
+    st.info("برای شروع، روی دکمه 'بارگذاری مدل و اجرا' کلیک کنید.")
+    with st.expander("راهنمای استفاده"):
+        st.markdown("""
+        ### نحوه استفاده:
+        1. مسیر پوشه مدل را در نوار کناری تنظیم کنید
+        2. تنظیمات مورد نظر (device، batch size) را انتخاب کنید  
+        3. نوع نمایش را انتخاب کنید:
+           - **تجمیعی**: نمایش مجموع فروش همه فروشگاه‌ها
+           - **فروشگاه خاص**: نمایش فروش یک فروشگاه خاص
+        4. روی دکمه "بارگذاری مدل و اجرا" کلیک کنید
+        5. برای محاسبه اهمیت ویژگی‌ها، از تب‌های "اهمیت ویژگی‌ها" استفاده کنید
+        """)
+        st.markdown("---")
+        st.markdown("""
+        ### درباره روش‌های Feature Importance:
+        **1. روش کلاسیک TFT:**
+        - از attention mechanism مدل استفاده می‌کند
+        - نتایج سریع‌تر اما محدود به ساختار مدل
+        - ممکن است همیشه کار نکند
+        **2. روش Permutation:**
+        - مستقل از نوع مدل
+        - اندازه‌گیری تاثیر واقعی هر ویژگی
+        - زمان‌بر اما دقیق‌تر و قابل‌اعتمادتر
+        - با هر نوع مدل ML سازگار است
+        """)
